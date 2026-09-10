@@ -1,0 +1,23 @@
+[package]
+name = "javelin-pattern"
+version = "0.1.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Rust bindings to Jeffrey Lim's JavelinPattern regular expression engine."
+repository = "https://github.com/9cel/javelin-rs"
+documentation = "https://docs.rs/javelin-pattern"
+license = "BSD-3-Clause"
+readme = "README.md"
+keywords = ["regex", "javelin", "pattern", "jit"]
+categories = ["text-processing"]
+include = ["src/**", "tests/**", "Cargo.toml", "README.md", "LICENSE"]
+
+[workspace]
+members = ["javelin-sys"]
+resolver = "3"
+
+[dependencies]
+javelin-sys = { version = "0.1.0", path = "javelin-sys" }
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]

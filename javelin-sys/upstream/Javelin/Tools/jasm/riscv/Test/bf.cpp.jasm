@@ -1,0 +1,363 @@
+// Adapted from http://corsix.github.io/dynasm-doc/tutorial.html
+
+#include "Javelin/Assembler/Assembler.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/time.h>
+
+#define RUN_BUILD_BENCHMARK 0
+
+#define TAPE_SIZE 32768
+#define MAX_NESTING 100
+
+unsigned char tape[TAPE_SIZE];
+
+static uint64_t GetMicroTime()
+{
+  timeval tp;
+  gettimeofday(&tp, nullptr);
+  
+  return tp.tv_sec * 1000000ULL + tp.tv_usec;
+}
+
+#define bad_program(s) exit(fprintf(stderr, "bad program near %.16s: %s\n", program, s))
+
+» .define pTape s0
+» .define putch s2
+» .define getch s3
+
+» .macro l_beqz reg, target
+»   .if delta13 target
+»     beqz reg, target
+»   .else
+»     bnez reg, 1f
+»     n.j target
+»   1:
+»   .endif
+» .endm
+»
+» .macro l_bnez reg, target
+»   .if delta13 target
+»     bnez reg, target
+»   .else
+»     beqz reg, 1f
+»     n.j target
+»   1:
+»   .endif
+» .endm
+
+static bool IsPowerOf2(unsigned int i)  { return (i & (i-1) ) == 0; }
+
+static bool bf_isBalancedLoopWithSingleDecrement(const char *program)
+{
+  int n;
+  int activeOffset = 0;
+  int offset0Adjust = 0;
+  for(;;) {
+    switch(*program++) {
+      case '<':
+        for(n = 1; *program == '<'; ++n, ++program);
+        activeOffset -= n;
+        break;
+      case '>':
+        for(n = 1; *program == '>'; ++n, ++program);
+        activeOffset += n;
+        break;
+      case '+':
+        for(n = 1; *program == '+'; ++n, ++program);
+        if(activeOffset == 0) offset0Adjust += n;
+        break;
+      case '-':
+        for(n = 1; *program == '-'; ++n, ++program);
+        if(activeOffset == 0) offset0Adjust -= n;
+        break;
+      case ',':
+        return false;
+      case '.':
+        return false;
+      case '[':
+        return false;
+      case ']':
+        return activeOffset == 0 && offset0Adjust == -1;
+      case 0:
+        program = "<EOF>";
+        bad_program("[ without matching ]");
+    }
+  }
+}
+
+
+static void UpdateOffset(Javelin::Assembler &assembler, int &activeOffset)
+{
+  if (activeOffset == 0) return;
+    
+  » addi pTape, {activeOffset}
+  activeOffset = 0;
+}
+
+static void UpdateOffsetBounds(Javelin::Assembler &assembler, int &activeOffset)
+{
+  if(activeOffset < -1024 || activeOffset >= 1024) {
+    » addi pTape, {activeOffset}
+    activeOffset = 0;
+  }
+}
+
+static void bf_emitBalancedLoopWithSingleDecrement(Javelin::Assembler &assembler, const char *&program, int baseActiveOffset)
+{
+  int n;
+  int activeOffset = 0;
+  int offset0Adjust = 0;
+  » lb a1, {baseActiveOffset}(pTape)
+  for(;;) {
+    switch(*program++) {
+      case '<':
+        for(n = 1; *program == '<'; ++n, ++program);
+        activeOffset -= n;
+        break;
+      case '>':
+        for(n = 1; *program == '>'; ++n, ++program);
+        activeOffset += n;
+        break;
+      case '+':
+        for(n = 1; *program == '+'; ++n, ++program);
+        if(activeOffset == 0) {
+          offset0Adjust += n;
+        } else if(n == 1) {
+          » lb a0, {baseActiveOffset+activeOffset}(pTape)
+          » add a0, a0, a1
+          » sb a0, {baseActiveOffset+activeOffset}(pTape)
+        } else if(IsPowerOf2(n)) {
+          » lb a0, {baseActiveOffset+activeOffset}(pTape)
+          » slli a2, a1, {__builtin_ctz(n)}
+          » add a0, a0, a2
+          » sb a0, {baseActiveOffset+activeOffset}(pTape)
+        } else {
+          » lb a0, {baseActiveOffset+activeOffset}(pTape)
+          » li a2, {n}
+          » mul a2, a2, a1
+          » add a0, a0, a2
+          » sb a0, {baseActiveOffset+activeOffset}(pTape)
+        }
+        break;
+      case '-':
+        for(n = 1; *program == '-'; ++n, ++program);
+        if(activeOffset == 0) {
+          offset0Adjust += n;
+        } else if (n == 1) {
+          » lb a0, {baseActiveOffset+activeOffset}(pTape)
+          » sub a0, a0, a1
+          » sb a0, {baseActiveOffset+activeOffset}(pTape)
+        } else if(IsPowerOf2(n)) {
+          » lb a0, {baseActiveOffset+activeOffset}(pTape)
+          » slli a2, a1, {__builtin_ctz(n)}
+          » sub a0, a0, a2
+          » sb a0, {baseActiveOffset+activeOffset}(pTape)
+        } else {
+          » lb a0, {baseActiveOffset+activeOffset}(pTape)
+          » li a2, {n}
+          » mul a2, a2, a1
+          » sub a0, a0, a2
+          » sb a0, {baseActiveOffset+activeOffset}(pTape)
+        }
+        break;
+      case ']':
+        » sb zero, {baseActiveOffset}(pTape)
+        return;
+    }
+  }
+}
+
+static void bf_compile(const char* program, Javelin::Assembler &assembler)
+{
+  const int UNKNOWN_STORE = 0x80000000;
+  
+  unsigned loops[MAX_NESTING];
+  int n;
+  int nloops = 0;
+  int labelIndex = 0;
+  int activeOffset = 0;
+  int lastStore = UNKNOWN_STORE;
+  const char *start = program;
+
+  for(;;) {
+    switch(*program++) {
+    case '<':
+      for(n = 1; *program == '<'; ++n, ++program);
+      activeOffset -= n;
+      break;
+    case '>':
+      for(n = 1; *program == '>'; ++n, ++program);
+      activeOffset += n;
+      break;
+    case '+':
+      for(n = 1; *program == '+'; ++n, ++program);
+      UpdateOffsetBounds(assembler, activeOffset);
+      » lb a0, {activeOffset}(pTape)
+      » addi a0, {n}
+      » sb a0, {activeOffset}(pTape)
+      lastStore = activeOffset;
+      break;
+    case '-':
+      for(n = 1; *program == '-'; ++n, ++program);
+      UpdateOffsetBounds(assembler, activeOffset);
+      » lb a0, {activeOffset}(pTape)
+      » addi a0, {-n}
+      » sb a0, {activeOffset}(pTape)
+      lastStore = activeOffset;
+      break;
+    case ',':
+      UpdateOffsetBounds(assembler, activeOffset);
+      » jalr getch
+      » sb a0, {activeOffset}(pTape)
+      lastStore = activeOffset;
+      break;
+    case '.':
+      UpdateOffsetBounds(assembler, activeOffset);
+      » lb a0, {activeOffset}(pTape)
+      » jalr putch
+      lastStore = UNKNOWN_STORE;
+      break;
+    case '[':
+      if(nloops == MAX_NESTING)
+        bad_program("Nesting too deep");
+      if(program[0] == '-' && program[1] == ']') {
+        // Special case zero detection,
+        UpdateOffsetBounds(assembler, activeOffset);
+        » sb zero, {activeOffset}(pTape)
+        program += 2;
+      } else if(bf_isBalancedLoopWithSingleDecrement(program)) {
+        bf_emitBalancedLoopWithSingleDecrement(assembler, program, activeOffset);
+      } else {
+        // If the previuos symbol was also a while (*ptr)
+        // Then no updates to activeOffset or a comparison need to be made.
+        if(program-2 < start || program[-2] != '[') {
+          if(activeOffset != lastStore) {
+            UpdateOffsetBounds(assembler, activeOffset);
+            » lb a0, {activeOffset}(pTape)
+          }
+          UpdateOffset(assembler, activeOffset);
+          » l_beqz a0, {labelIndex+1}f
+          »{labelIndex}:
+        } else {
+          »{labelIndex}:
+        }
+        
+        loops[nloops] = labelIndex;
+        ++nloops;
+        labelIndex += 2;
+      }
+      lastStore = UNKNOWN_STORE;
+      break;
+    case ']':
+      if(nloops == 0) {
+        bad_program("] without matching [");
+      } if (program[-2] == ']') {
+        UpdateOffset(assembler, activeOffset);
+        int labelIndex = loops[--nloops];
+        »{labelIndex+1}:
+      } else {
+        int labelIndex = loops[--nloops];
+        
+        if(activeOffset != lastStore) {
+          » lb a0, {activeOffset}(pTape)
+        }
+        UpdateOffset(assembler, activeOffset);
+        » l_bnez a0, {labelIndex}b
+        »{labelIndex+1}:
+      }
+      lastStore = UNKNOWN_STORE;
+      break;
+    case 0:
+      if(nloops != 0) {
+        program = "<EOF>";
+        bad_program("[ without matching ]");
+      }
+      return;
+    }
+  }
+}
+
+static void bf_run(const char* program)
+{
+#if RUN_BUILD_BENCHMARK
+  for(int i = 0; i < 40000; ++i)
+#endif
+  {
+    Javelin::Assembler assembler;
+    
+#if !RUN_BUILD_BENCHMARK
+    uint64_t startParse = GetMicroTime();
+#endif
+    » addi sp, -32
+    » sd pTape, (sp)
+    » sd putch, 8(sp)
+    » sd getch, 16(sp)
+    » sd ra, 24(sp)
+    » mv pTape, a0
+    » mv putch, a1
+    » mv getch, a2
+    bf_compile(program, assembler);
+    » ld pTape, (sp)
+    » ld putch, 8(sp)
+    » ld getch, 16(sp)
+    » ld ra, 24(sp)
+    » addi sp, 32
+    » ret
+
+#if !RUN_BUILD_BENCHMARK
+    uint64_t endParse = GetMicroTime();
+    printf("Parse time: %lluus\n", endParse - startParse);
+
+    uint64_t startBuild = GetMicroTime();
+#endif
+    typedef void (*JitMethod)(unsigned char* tape, int (*putchar)(int), int (*getchar)());
+    JitMethod function = (JitMethod) assembler.Build();
+#if !RUN_BUILD_BENCHMARK
+    uint64_t endBuild = GetMicroTime();
+    printf("Build time: %lluus\n", endBuild - startBuild);
+    printf("Code size: %u\n", assembler.GetCodeSize());
+
+    function(tape, putchar, getchar);
+#endif
+    
+    Javelin::SimpleJitMemoryManager::StaticInstanceRelease((void*) function);
+  }
+}
+
+int main(int argc, char** argv)
+{
+#if RUN_BUILD_BENCHMARK
+  for(int i = 0; i < 10; ++i)
+#endif
+  {
+    uint64_t start = GetMicroTime();
+    if(argc == 2) {
+      long sz;
+      char* program;
+      
+      FILE* f = fopen(argv[1], "r");
+      if(!f) {
+        fprintf(stderr, "Cannot open %s\n", argv[1]);
+        return 1;
+      }
+      fseek(f, 0, SEEK_END);
+      sz = ftell(f);
+      program = (char*)malloc(sz + 1);
+      fseek(f, 0, SEEK_SET);
+      program[fread(program, 1, sz, f)] = 0;
+      fclose(f);
+      bf_run(program);
+      uint64_t end = GetMicroTime();
+      printf("Execution time: %lluus\n", end-start);
+    } else {
+      fprintf(stderr, "Usage: %s INFILE.bf\n", argv[0]);
+      return 1;
+    }
+  }
+  return 0;
+}
+
+

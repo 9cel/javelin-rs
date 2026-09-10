@@ -1,0 +1,24 @@
+[package]
+name = "javelin-sys"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Low-level bindings to the JavelinPattern regular expression engine."
+repository = "https://github.com/9cel/javelin-rs"
+documentation = "https://docs.rs/javelin-sys"
+license = "BSD-3-Clause AND Unicode-3.0"
+readme = "README.md"
+links = "JavelinPattern"
+keywords = ["regex", "javelin", "ffi"]
+categories = ["external-ffi-bindings", "text-processing"]
+include = [
+    "src/**", "tests/**", "build.rs", "Cargo.toml", "README.md", "LICENSE",
+    "upstream/**", "!upstream/.git/**", "!upstream/build/**",
+    "!upstream/**/__pycache__/**",
+]
+
+[build-dependencies]
+cc = { version = "1.2", features = ["parallel"] }
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
