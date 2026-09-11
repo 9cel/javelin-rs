@@ -1,7 +1,7 @@
 # javelin-pattern
 
 Rust bindings to [Jeffrey Lim's JavelinPattern](https://github.com/jthlim/JavelinPattern)
-regular expression engine. This crate provides a safe API on top of [`javelin-sys`](javelin-sys/README),
+regular expression engine. This crate provides a safe API on top of [`javelin-sys`](javelin-sys/README.md),
 which builds a vendored copy of the C++ library and exposes a fairly literal mapping of its C API.
 
 ```toml
