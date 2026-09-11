@@ -39,14 +39,14 @@ dependencies = [
 
 [[package]]
 name = "javelin-pattern"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "javelin-sys",
 ]
 
 [[package]]
 name = "javelin-sys"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cc",
 ]

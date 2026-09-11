@@ -178,6 +178,69 @@ void InstructionList::AddInstruction(Instruction* instruction)
 {
 	Patch(instruction);
 	instructionList.Append(instruction);
+	if(nullableIterationList.HasData()) RecordNullableIteration(instruction);
+}
+
+void InstructionList::RecordNullableIteration(Instruction* instruction)
+{
+	for(NullableIteration* iteration : nullableIterationList) iteration->Record(instruction);
+	if(!instruction->IsByteConsumer() || instruction->type == InstructionType::Fail) return;
+
+	for(NullableIteration* iteration : nullableIterationList)
+	{
+		if(!iteration->recordingUnconsumedCopy) continue;
+
+		JumpInstruction* redirect = new JumpInstruction;
+		instructionList.Append(redirect);
+		iteration->redirectList.Append(NullableIteration::Redirect{redirect, iteration->unconsumedCopy.GetCount()-1});
+		for(NullableIteration* other : nullableIterationList)
+		{
+			if(other != iteration) other->Record(redirect);
+		}
+	}
+}
+
+InstructionList::NullableIteration::NullableIteration(InstructionList& aInstructionList)
+: instructionList(aInstructionList)
+{
+	instructionList.nullableIterationList.Append(this);
+}
+
+InstructionList::NullableIteration::~NullableIteration()
+{
+	JASSERT(instructionList.nullableIterationList.Back() == this);
+	instructionList.nullableIterationList.Pop();
+}
+
+void InstructionList::NullableIteration::BeginUnconsumedCopy(Instruction* aAfterConsumedCopy)
+{
+	afterConsumedCopy = aAfterConsumedCopy;
+	recordingUnconsumedCopy = true;
+}
+
+void InstructionList::NullableIteration::Finish()
+{
+	JASSERT(consumedCopy.GetCount() == unconsumedCopy.GetCount());
+	for(const Redirect& redirect : redirectList)
+	{
+		size_t next = redirect.index + 1;
+		redirect.jump->target = next < consumedCopy.GetCount() ? consumedCopy[next] : afterConsumedCopy;
+	}
+}
+
+bool InstructionList::NullableIteration::RequiresProgressCheck() const
+{
+	static constexpr EnumSet<InstructionType, uint64_t> BACK_TRACKING_SET
+	{
+		InstructionType::BackReference,
+		InstructionType::Call,
+		InstructionType::Possess,
+		InstructionType::Recurse,
+	};
+
+	return consumedCopy.HasElement([](const Instruction* instruction) -> bool {
+		return BACK_TRACKING_SET.Contains(instruction->type);
+	});
 }
 
 void InstructionList::RemoveInstruction(Instruction* instruction)
@@ -2154,7 +2217,12 @@ void InstructionList::Optimize_SplitToDispatch()
 				}
 			}
 
-			if(hasMatch && !byteTarget && GetMatchStartingFrom(target) != nullptr) continue;
+			if(hasMatch && !byteTarget && GetMatchStartingFrom(target) != nullptr)
+			{
+				// A partial match takes an accepting branch over any lower priority byte branch.
+				if(!matchRequiresEndOfInput && j != numberOfTargets-1) goto Next;
+				continue;
+			}
 			if(!byteTarget) goto Next;
 
 			if(hasMatch && !matchRequiresEndOfInput)
@@ -2853,6 +2921,12 @@ void InstructionList::AddToSearchOptimizer(Instruction* split, Instruction* afte
 
 	while(walker.ShouldContinue())
 	{
+		// A consuming loop with no reachable match can keep this walk alive forever.
+		if(walker.GetPresenceListCount() == 1024)
+		{
+			delete optimizer;
+			return;
+		}
 		walker.AdvanceAllInstructions();
 	}
 
@@ -2964,6 +3038,13 @@ void InstructionList::SearchOptimizer::ReplaceOriginal(Instruction* searcher, bo
 		   && ((jumpTableInstruction->targetList[0] == searcher && jumpTableInstruction->targetList[1] == jumpTableInstruction->GetNext())
 			   || (jumpTableInstruction->targetList[1] == searcher && jumpTableInstruction->targetList[0] == jumpTableInstruction->GetNext())))
 		{
+			// Search candidates may still take the loop branch after state simplification.
+			const StaticBitTable<256>& presenceBits = instructionWalker.GetPresenceBits(0);
+			for(size_t c = 0; c < 256; ++c)
+			{
+				if(presenceBits[c] && jumpTableInstruction->targetList[jumpTableInstruction->targetTable[c]] != next) return;
+			}
+
 			Instruction* advance = new AdvanceByteInstruction;
 			ReplaceInstruction(localOriginal, advance);
 			advance->referenceList.Append(InstructionReference::PREVIOUS);

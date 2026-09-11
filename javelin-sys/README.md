@@ -4,7 +4,7 @@ Low-level Rust bindings to [Jeffrey Lim's JavelinPattern](https://github.com/jth
 For ordinary matching, use the safe `javelin-pattern` crate.
 
 `upstream/` vendors the engine sources from
-[`9cel/JavelinPattern`, revision `6e7eb45`](https://github.com/9cel/JavelinPattern/commit/6e7eb45).
+[`9cel/JavelinPattern`, revision `0c08400`](https://github.com/9cel/JavelinPattern/commit/0c08400).
 This fork has improved Unicode support (+ other misc. improvements) and fixes some bugs
 that I discovered while testing and benchmarking.
 
